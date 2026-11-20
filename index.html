@@ -1,0 +1,1987 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#000000">
+  <title>手势星辉圣诞树</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      background: #000;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html,
+    body {
+      width: 100%;
+      height: 100%;
+      margin: 0;
+      overflow: hidden;
+      background: #000;
+    }
+
+    body {
+      position: fixed;
+      inset: 0;
+      overscroll-behavior: none;
+      touch-action: none;
+    }
+
+    #scene {
+      position: fixed;
+      inset: 0;
+      display: block;
+      width: 100%;
+      height: 100%;
+      background: #000;
+    }
+
+    #camera {
+      position: fixed;
+      left: -2px;
+      bottom: -2px;
+      width: 1px;
+      height: 1px;
+      opacity: 0;
+      pointer-events: none;
+    }
+
+    #notice {
+      position: fixed;
+      left: 50%;
+      bottom: max(24px, env(safe-area-inset-bottom));
+      z-index: 2;
+      max-width: min(560px, calc(100vw - 40px));
+      padding: 10px 16px;
+      transform: translate(-50%, 10px);
+      border: 1px solid rgba(255, 239, 201, 0.16);
+      border-radius: 999px;
+      background: rgba(8, 12, 10, 0.72);
+      box-shadow: 0 8px 40px rgba(0, 0, 0, 0.6);
+      color: rgba(255, 244, 220, 0.82);
+      font: 13px/1.5 "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      letter-spacing: 0.02em;
+      text-align: center;
+      opacity: 0;
+      pointer-events: none;
+      backdrop-filter: blur(14px);
+      transition: opacity 0.45s ease, transform 0.45s ease;
+    }
+
+    #notice.visible {
+      opacity: 1;
+      transform: translate(-50%, 0);
+    }
+  </style>
+
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.160.1/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.1/examples/jsm/"
+      }
+    }
+  </script>
+</head>
+<body>
+  <canvas id="scene" aria-label="手势交互粒子圣诞树"></canvas>
+  <video id="camera" playsinline muted autoplay aria-hidden="true"></video>
+  <div id="notice" role="status" aria-live="polite"></div>
+
+  <script
+    src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/hands.js"
+    crossorigin="anonymous"
+    onerror="window.__handsLoadFailed = true"
+  ></script>
+
+  <script type="module">
+    import * as THREE from "three";
+    import { EffectComposer } from "three/addons/postprocessing/EffectComposer.js";
+    import { RenderPass } from "three/addons/postprocessing/RenderPass.js";
+    import { ShaderPass } from "three/addons/postprocessing/ShaderPass.js";
+    import { Pass, FullScreenQuad } from "three/addons/postprocessing/Pass.js";
+    import { OutputPass } from "three/addons/postprocessing/OutputPass.js";
+    import { FXAAShader } from "three/addons/shaders/FXAAShader.js";
+
+    // =========================================================================
+    // 可调参数：核心视觉与交互数值都集中在 CONFIG，便于快速调校。
+    // =========================================================================
+    const CONFIG = {
+      // 【粒子数量】总粒子数约 3000；特效星火使用独立固定对象池，不计入树体。
+      particleCount: 3000,
+
+      // 【配色】主体翠绿约占 72%，红 / 金 / 暖白作为高亮点缀。
+      colors: {
+        emerald: [0x0cd77a, 0x15f59a, 0x37ffad, 0x08a867, 0x6affd0],
+        christmasRed: [0xff2147, 0xd50d38, 0xff5b66],
+        gold: [0xffba42, 0xffd66e, 0xf39a24],
+        warmWhite: [0xfff0c5, 0xffdca2, 0xfff8e8]
+      },
+
+      tree: {
+        bottomY: -4.38,
+        height: 9.38,
+        maxRadius: 4.28,
+        layers: 7,
+        idleSpin: 0.125,
+        interactionSpinScale: 0.42
+      },
+
+      // 【爆发力度】速度单位为场景单位 / 秒。值越大，星点飞溅越远。
+      burst: {
+        speedMin: 2.7,
+        speedMax: 8.8,
+        upwardBias: 0.9,
+        randomness: 1.5
+      },
+
+      // 【场力参数】手掌半径、旋涡、双手拉伸、重力与空气阻力。
+      force: {
+        palmRadius: 4.7,
+        palmVortex: 5.2,
+        palmPull: 0.82,
+        palmFlowGain: 0.23,
+        twoHandRadius: 3.5,
+        twoHandBridge: 4.2,
+        twoHandPull: 1.05,
+        swipeRadius: 2.0,
+        swipeStrength: 6.2,
+        fireworkPushRadius: 2.35,
+        fireworkPush: 2.8,
+        gravity: 4.8,
+        airDrag: 0.62,
+        idleSpring: 2.15,
+        collectSpring: 8.5,
+        floorY: -6.1
+      },
+
+      // 【Bloom 强度】先宽域柔光，再高阈值主辉光，形成双层电影感辉光。
+      bloom: {
+        wideStrength: 1.45,
+        wideRadius: 1.0,
+        wideThreshold: 0.28,
+        coreStrength: 0.9,
+        heartBoost: 0.46,
+        burstBoost: 0.22
+      },
+
+      // 【拖尾长度】散开速度越高，线段拖尾越长；数值为速度的时间乘数。
+      trail: {
+        treeLength: 0.185,
+        sparkLength: 0.115,
+        treeOpacity: 0.4,
+        sparkOpacity: 0.62
+      },
+
+      exposure: 1.11,
+      sparkPoolSize: 720
+    };
+
+    const canvas = document.querySelector("#scene");
+    const video = document.querySelector("#camera");
+    const notice = document.querySelector("#notice");
+    const clock = new THREE.Clock();
+    const tempWorld = new THREE.Vector3();
+    const tempVector = new THREE.Vector3();
+    const tempColor = new THREE.Color();
+
+    let noticeTimer = 0;
+    function showNotice(message, duration = 7000) {
+      window.clearTimeout(noticeTimer);
+      notice.textContent = message;
+      notice.classList.add("visible");
+      if (duration > 0) {
+        noticeTimer = window.setTimeout(() => notice.classList.remove("visible"), duration);
+      }
+    }
+
+    // -------------------------------------------------------------------------
+    // 基础渲染：深黑背景、ACES 色调映射、双层 Bloom 与轻量电影调色。
+    // -------------------------------------------------------------------------
+    const renderer = new THREE.WebGLRenderer({
+      canvas,
+      alpha: false,
+      antialias: false,
+      powerPreference: "high-performance",
+      stencil: false,
+      depth: true
+    });
+    renderer.setClearColor(0x000000, 1);
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = CONFIG.exposure;
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x000000);
+
+    const camera = new THREE.PerspectiveCamera(43, 1, 0.1, 80);
+    camera.position.set(0, 0.38, 13.8);
+    camera.lookAt(0, 0.36, 0);
+
+    const treeGroup = new THREE.Group();
+    scene.add(treeGroup);
+
+    const composer = new EffectComposer(renderer);
+    const renderPass = new RenderPass(scene, camera);
+    // 自定义分层 Bloom：高阈值提取 + 近域 / 宽域高斯模糊，再以加法叠加。
+    // 不依赖低分辨率 mip，能保留圆润星点并避免方块状光斑。
+    class SmoothBloomPass extends Pass {
+      constructor(resolution, nearStrength, wideStrength, threshold, spread) {
+        super();
+        this.nearStrength = nearStrength;
+        this.wideStrength = wideStrength;
+        this.threshold = threshold;
+        this.spread = spread;
+        this.scale = 0.76;
+        this.wideScale = 0.82;
+        this.needsSwap = false;
+
+        const makeTarget = () => {
+          const target = new THREE.WebGLRenderTarget(1, 1, {
+            type: THREE.HalfFloatType,
+            depthBuffer: false
+          });
+          target.texture.minFilter = THREE.LinearFilter;
+          target.texture.magFilter = THREE.LinearFilter;
+          return target;
+        };
+
+        this.brightTarget = makeTarget();
+        this.horizontalTarget = makeTarget();
+        this.verticalTarget = makeTarget();
+        this.wideHorizontalTarget = makeTarget();
+        this.wideVerticalTarget = makeTarget();
+        this.wideSmoothHorizontalTarget = makeTarget();
+        this.wideSmoothVerticalTarget = makeTarget();
+
+        const fullscreenVertex = /* glsl */ `
+          varying vec2 vUv;
+          void main() {
+            vUv = uv;
+            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+          }
+        `;
+
+        this.highPassMaterial = new THREE.ShaderMaterial({
+          uniforms: {
+            tDiffuse: { value: null },
+            uThreshold: { value: threshold }
+          },
+          vertexShader: fullscreenVertex,
+          fragmentShader: /* glsl */ `
+            uniform sampler2D tDiffuse;
+            uniform float uThreshold;
+            varying vec2 vUv;
+            void main() {
+              vec3 color = texture2D(tDiffuse, vUv).rgb;
+              float luminance = dot(color, vec3(0.2126, 0.7152, 0.0722));
+              gl_FragColor = vec4(
+                color * smoothstep(uThreshold, uThreshold + 0.12, luminance),
+                1.0
+              );
+            }
+          `
+        });
+
+        this.blurMaterial = new THREE.ShaderMaterial({
+          uniforms: {
+            tDiffuse: { value: null },
+            uTexel: { value: new THREE.Vector2(1, 1) },
+            uDirection: { value: new THREE.Vector2(1, 0) },
+            uStride: { value: 4 },
+            uSeed: { value: 0 }
+          },
+          vertexShader: fullscreenVertex,
+          fragmentShader: /* glsl */ `
+            uniform sampler2D tDiffuse;
+            uniform vec2 uTexel;
+            uniform vec2 uDirection;
+            uniform float uStride;
+            uniform float uSeed;
+            varying vec2 vUv;
+            float hash21(vec2 p) {
+              p = fract(p * vec2(123.34, 456.21));
+              p += dot(p, p + 45.32);
+              return fract(p.x * p.y);
+            }
+            void main() {
+              float weights[5];
+              weights[0] = 0.227027;
+              weights[1] = 0.1945946;
+              weights[2] = 0.1216216;
+              weights[3] = 0.054054;
+              weights[4] = 0.016216;
+              vec3 sum = texture2D(tDiffuse, vUv).rgb * weights[0];
+              float jitter = hash21(vUv * 917.0 + uSeed) - 0.5;
+              vec2 crossOffset = uDirection.yx * uTexel * uStride * jitter * 0.9;
+              for (int i = 1; i < 5; i++) {
+                vec2 offset = uDirection * uTexel * float(i) * uStride + crossOffset;
+                sum += texture2D(tDiffuse, vUv + offset).rgb * weights[i];
+                sum += texture2D(tDiffuse, vUv - offset).rgb * weights[i];
+              }
+              gl_FragColor = vec4(sum, 1.0);
+            }
+          `
+        });
+
+        this.compositeMaterial = new THREE.ShaderMaterial({
+          uniforms: {
+            tDiffuse: { value: null },
+            tWide: { value: null },
+            uNearStrength: { value: nearStrength },
+            uWideStrength: { value: wideStrength },
+            uWideTexel: { value: new THREE.Vector2(1, 1) }
+          },
+          vertexShader: fullscreenVertex,
+          fragmentShader: /* glsl */ `
+            uniform sampler2D tDiffuse;
+            uniform sampler2D tWide;
+            uniform float uNearStrength;
+            uniform float uWideStrength;
+            uniform vec2 uWideTexel;
+            varying vec2 vUv;
+            void main() {
+              vec3 nearGlow = texture2D(tDiffuse, vUv).rgb;
+              vec2 o = uWideTexel * 0.9;
+              vec3 wideGlow = texture2D(tWide, vUv).rgb * 0.36;
+              wideGlow += texture2D(tWide, vUv + vec2(o.x, 0.0)).rgb * 0.16;
+              wideGlow += texture2D(tWide, vUv - vec2(o.x, 0.0)).rgb * 0.16;
+              wideGlow += texture2D(tWide, vUv + vec2(0.0, o.y)).rgb * 0.16;
+              wideGlow += texture2D(tWide, vUv - vec2(0.0, o.y)).rgb * 0.16;
+              gl_FragColor = vec4(
+                nearGlow * uNearStrength + wideGlow * uWideStrength,
+                1.0
+              );
+            }
+          `,
+          transparent: true,
+          blending: THREE.AdditiveBlending,
+          depthTest: false,
+          depthWrite: false
+        });
+
+        this.fsQuad = new FullScreenQuad(null);
+        this.setSize(resolution.x, resolution.y);
+      }
+
+      setSize(width, height) {
+        const targetWidth = Math.max(1, Math.floor(width * this.scale));
+        const targetHeight = Math.max(1, Math.floor(height * this.scale));
+        const wideWidth = Math.max(1, Math.floor(width * this.wideScale));
+        const wideHeight = Math.max(1, Math.floor(height * this.wideScale));
+        this.brightTarget.setSize(targetWidth, targetHeight);
+        this.horizontalTarget.setSize(targetWidth, targetHeight);
+        this.verticalTarget.setSize(targetWidth, targetHeight);
+        this.wideHorizontalTarget.setSize(wideWidth, wideHeight);
+        this.wideVerticalTarget.setSize(wideWidth, wideHeight);
+        this.wideSmoothHorizontalTarget.setSize(wideWidth, wideHeight);
+        this.wideSmoothVerticalTarget.setSize(wideWidth, wideHeight);
+      }
+
+      render(renderer, writeBuffer, readBuffer) {
+        const autoClear = renderer.autoClear;
+        renderer.autoClear = false;
+
+        this.fsQuad.material = this.highPassMaterial;
+        this.highPassMaterial.uniforms.tDiffuse.value = readBuffer.texture;
+        this.highPassMaterial.uniforms.uThreshold.value = this.threshold;
+        renderer.setRenderTarget(this.brightTarget);
+        renderer.clear();
+        this.fsQuad.render(renderer);
+
+        const fullWidth = this.brightTarget.width;
+        const fullHeight = this.brightTarget.height;
+        this.fsQuad.material = this.blurMaterial;
+        this.blurMaterial.uniforms.uTexel.value.set(1 / fullWidth, 1 / fullHeight);
+        this.blurMaterial.uniforms.uStride.value = 4;
+        this.blurMaterial.uniforms.uSeed.value = 1.7;
+        this.blurMaterial.uniforms.tDiffuse.value = this.brightTarget.texture;
+        this.blurMaterial.uniforms.uDirection.value.set(1, 0);
+        renderer.setRenderTarget(this.horizontalTarget);
+        renderer.clear();
+        this.fsQuad.render(renderer);
+
+        this.blurMaterial.uniforms.tDiffuse.value = this.horizontalTarget.texture;
+        this.blurMaterial.uniforms.uDirection.value.set(0, 1);
+        renderer.setRenderTarget(this.verticalTarget);
+        renderer.clear();
+        this.fsQuad.render(renderer);
+
+        const wideWidth = this.wideVerticalTarget.width;
+        const wideHeight = this.wideVerticalTarget.height;
+        this.blurMaterial.uniforms.uTexel.value.set(1 / wideWidth, 1 / wideHeight);
+        this.blurMaterial.uniforms.uStride.value = this.spread;
+        this.blurMaterial.uniforms.uSeed.value = 5.3;
+        this.blurMaterial.uniforms.tDiffuse.value = this.verticalTarget.texture;
+        this.blurMaterial.uniforms.uDirection.value.set(1, 0);
+        renderer.setRenderTarget(this.wideHorizontalTarget);
+        renderer.clear();
+        this.fsQuad.render(renderer);
+
+        this.blurMaterial.uniforms.tDiffuse.value = this.wideHorizontalTarget.texture;
+        this.blurMaterial.uniforms.uDirection.value.set(0, 1);
+        renderer.setRenderTarget(this.wideVerticalTarget);
+        renderer.clear();
+        this.fsQuad.render(renderer);
+
+        this.blurMaterial.uniforms.uStride.value = this.spread * 1.6;
+        this.blurMaterial.uniforms.uSeed.value = 9.1;
+        this.blurMaterial.uniforms.tDiffuse.value = this.wideVerticalTarget.texture;
+        this.blurMaterial.uniforms.uDirection.value.set(1, 0);
+        renderer.setRenderTarget(this.wideSmoothHorizontalTarget);
+        renderer.clear();
+        this.fsQuad.render(renderer);
+
+        this.blurMaterial.uniforms.tDiffuse.value = this.wideSmoothHorizontalTarget.texture;
+        this.blurMaterial.uniforms.uDirection.value.set(0, 1);
+        renderer.setRenderTarget(this.wideSmoothVerticalTarget);
+        renderer.clear();
+        this.fsQuad.render(renderer);
+
+        this.fsQuad.material = this.compositeMaterial;
+        this.compositeMaterial.uniforms.tDiffuse.value = this.verticalTarget.texture;
+        this.compositeMaterial.uniforms.tWide.value = this.wideSmoothVerticalTarget.texture;
+        this.compositeMaterial.uniforms.uNearStrength.value = this.nearStrength;
+        this.compositeMaterial.uniforms.uWideStrength.value = this.wideStrength;
+        this.compositeMaterial.uniforms.uWideTexel.value.set(
+          1 / this.wideSmoothVerticalTarget.width,
+          1 / this.wideSmoothVerticalTarget.height
+        );
+        renderer.setRenderTarget(readBuffer);
+        this.fsQuad.render(renderer);
+        renderer.autoClear = autoClear;
+      }
+    }
+
+    const smoothBloom = new SmoothBloomPass(
+      new THREE.Vector2(1, 1),
+      CONFIG.bloom.coreStrength,
+      CONFIG.bloom.wideStrength,
+      CONFIG.bloom.wideThreshold,
+      CONFIG.bloom.wideRadius
+    );
+
+    const filmGradeShader = {
+      uniforms: {
+        tDiffuse: { value: null },
+        uTime: { value: 0 },
+        uHeart: { value: 0 },
+        uHeartTime: { value: 10 },
+        uResolution: { value: new THREE.Vector2(1, 1) }
+      },
+      vertexShader: /* glsl */ `
+        varying vec2 vUv;
+        void main() {
+          vUv = uv;
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }
+      `,
+      fragmentShader: /* glsl */ `
+        uniform sampler2D tDiffuse;
+        uniform float uTime;
+        uniform float uHeart;
+        uniform float uHeartTime;
+        uniform vec2 uResolution;
+        varying vec2 vUv;
+
+        float hash21(vec2 p) {
+          p = fract(p * vec2(123.34, 456.21));
+          p += dot(p, p + 45.32);
+          return fract(p.x * p.y);
+        }
+
+        void main() {
+          vec2 centered = vUv - 0.5;
+          float edge = length(centered);
+          vec2 aberration = centered * 0.0012 * smoothstep(0.12, 0.72, edge);
+          float r = texture2D(tDiffuse, vUv + aberration).r;
+          float g = texture2D(tDiffuse, vUv).g;
+          float b = texture2D(tDiffuse, vUv - aberration).b;
+          vec3 color = vec3(r, g, b);
+
+          float vignette = 1.0 - smoothstep(0.33, 0.76, edge);
+          color *= mix(0.72, 1.0, vignette);
+          color *= vec3(1.018, 1.0, 0.965);
+
+          float grain = hash21(vUv * uResolution + fract(uTime) * 91.7) - 0.5;
+          color += grain * 0.007;
+
+          float progress = clamp(uHeartTime / 2.7, 0.0, 1.0);
+          float fade = uHeart * (1.0 - progress) * smoothstep(0.0, 0.09, progress);
+          float radius = length(centered * vec2(1.0, 1.13));
+          float ripple = 0.0;
+          float glints = 0.0;
+
+          for (int i = 0; i < 3; i++) {
+            float fi = float(i);
+            float waveRadius = progress * (0.26 + fi * 0.135);
+            float wave = exp(-pow((radius - waveRadius) * 43.0, 2.0));
+            float angle = atan(centered.y, centered.x);
+            float starField = pow(max(0.0, sin(angle * (33.0 + fi * 9.0) + progress * 13.0)), 15.0);
+            float sparse = smoothstep(0.62, 1.0, hash21(floor((centered + 0.5) * (70.0 + fi * 18.0))));
+            ripple += wave * (0.12 + fi * 0.03);
+            glints += wave * starField * (0.24 + sparse * 0.42);
+          }
+
+          float centerGlow = exp(-dot(centered, centered) * 18.0);
+          color += fade * vec3(1.0, 0.73, 0.34) * (ripple * 0.65 + glints * 0.8 + centerGlow * 0.035);
+
+          gl_FragColor = vec4(max(color, 0.0), 1.0);
+        }
+      `
+    };
+
+    const gradePass = new ShaderPass(filmGradeShader);
+    const fxaaPass = new ShaderPass(FXAAShader);
+    const outputPass = new OutputPass();
+    composer.addPass(renderPass);
+    composer.addPass(smoothBloom);
+    composer.addPass(fxaaPass);
+    composer.addPass(gradePass);
+    composer.addPass(outputPass);
+
+    // -------------------------------------------------------------------------
+    // 背景柔光：极暗的翡翠与暖金雾，避免纯黑画面显得单薄。
+    // -------------------------------------------------------------------------
+    const atmosphereMaterial = new THREE.ShaderMaterial({
+      uniforms: {
+        uTime: { value: 0 },
+        uHeart: { value: 0 }
+      },
+      vertexShader: /* glsl */ `
+        varying vec2 vUv;
+        void main() {
+          vUv = uv;
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }
+      `,
+      fragmentShader: /* glsl */ `
+        uniform float uTime;
+        uniform float uHeart;
+        varying vec2 vUv;
+
+        void main() {
+          vec2 p = vUv - 0.5;
+          float radius = length(p * vec2(1.06, 1.0));
+          float core = exp(-radius * radius * 16.0);
+          float haze = exp(-radius * radius * 4.4);
+          float drift = sin(vUv.y * 8.0 + uTime * 0.17) * 0.5 + 0.5;
+          float veil = sin(vUv.x * 11.0 - uTime * 0.12) * 0.5 + 0.5;
+          vec3 cool = vec3(0.003, 0.022, 0.014);
+          vec3 warm = vec3(0.017, 0.009, 0.0025);
+          vec3 tint = mix(cool, warm, smoothstep(0.15, 0.9, vUv.y) * 0.55);
+          float pulse = 0.9 + 0.1 * sin(uTime * 0.32 + drift);
+          vec3 color = tint * (core * (1.55 + uHeart * 0.8) + haze * (0.38 + veil * 0.1)) * pulse;
+          gl_FragColor = vec4(color, (core * 0.64 + haze * 0.17) * 0.28);
+        }
+      `,
+      transparent: true,
+      blending: THREE.AdditiveBlending,
+      depthTest: false,
+      depthWrite: false,
+      side: THREE.DoubleSide
+    });
+
+    const atmosphere = new THREE.Mesh(new THREE.PlaneGeometry(18, 13), atmosphereMaterial);
+    atmosphere.position.set(0, 0.25, -3.8);
+    atmosphere.renderOrder = -20;
+    scene.add(atmosphere);
+
+    // -------------------------------------------------------------------------
+    // 粒子着色器：圆核 + 弥散光晕 + 可选四芒星光。
+    // -------------------------------------------------------------------------
+    const particleUniforms = {
+      uTime: { value: 0 },
+      uPixelRatio: { value: Math.min(window.devicePixelRatio || 1, 1.25) },
+      uCollect: { value: 0 },
+      uGlow: { value: 1 }
+    };
+
+    const particleVertexShader = /* glsl */ `
+      uniform float uTime;
+      uniform float uPixelRatio;
+      uniform float uCollect;
+      uniform float uGlow;
+      attribute vec3 aColor;
+      attribute float aSize;
+      attribute float aPhase;
+      attribute float aSeed;
+      attribute float aOpacity;
+      varying vec3 vColor;
+      varying float vBrightness;
+      varying float vSeed;
+
+      void main() {
+        vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+        float breathe = 0.84 + 0.16 * sin(uTime * (0.52 + aSeed * 1.35) + aPhase);
+        float proximity = 1.0 + clamp((13.5 - (-mvPosition.z)) * 0.018, -0.045, 0.28);
+        vColor = aColor;
+        vSeed = aSeed;
+        vBrightness = breathe * proximity * aOpacity * (1.0 + uCollect * 0.24) * uGlow;
+        gl_PointSize = aSize * uPixelRatio * (10.8 / max(6.0, -mvPosition.z));
+        gl_PointSize *= 0.9 + 0.1 * breathe;
+        gl_PointSize = clamp(gl_PointSize, 1.0, 46.0 * uPixelRatio);
+        gl_Position = projectionMatrix * mvPosition;
+      }
+    `;
+
+    const particleFragmentShader = /* glsl */ `
+      varying vec3 vColor;
+      varying float vBrightness;
+      varying float vSeed;
+
+      void main() {
+        vec2 p = gl_PointCoord - 0.5;
+        float radius = length(p);
+        if (radius > 0.5) discard;
+
+        float core = exp(-radius * radius * 52.0);
+        float halo = exp(-radius * 8.2) * 0.24 + exp(-radius * 4.4) * 0.045;
+        float star = 0.0;
+
+        if (vSeed > 0.76) {
+          float sx = exp(-abs(p.y) * 96.0) * exp(-abs(p.x) * 5.5);
+          float sy = exp(-abs(p.x) * 96.0) * exp(-abs(p.y) * 5.5);
+          star = (sx + sy) * exp(-radius * 4.2) * 0.72;
+        }
+
+        float discFade = 1.0 - smoothstep(0.29, 0.5, radius);
+        float alpha = clamp((core * 0.72 + halo + star) * vBrightness * discFade, 0.0, 1.0);
+        vec3 color = vColor * vBrightness * (core * 1.85 + halo * 0.34 + star * 1.08) * discFade;
+        gl_FragColor = vec4(color, alpha);
+      }
+    `;
+
+    const pointMaterial = new THREE.ShaderMaterial({
+      uniforms: particleUniforms,
+      vertexShader: particleVertexShader,
+      fragmentShader: particleFragmentShader,
+      transparent: true,
+      blending: THREE.AdditiveBlending,
+      depthTest: false,
+      depthWrite: false
+    });
+
+    const lineVertexShader = /* glsl */ `
+      attribute vec3 aColor;
+      attribute float aAlpha;
+      varying vec3 vColor;
+      varying float vAlpha;
+      void main() {
+        vColor = aColor;
+        vAlpha = aAlpha;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }
+    `;
+
+    const lineFragmentShader = /* glsl */ `
+      varying vec3 vColor;
+      varying float vAlpha;
+      void main() {
+        gl_FragColor = vec4(vColor * vAlpha, vAlpha);
+      }
+    `;
+
+    const lineMaterial = new THREE.ShaderMaterial({
+      vertexShader: lineVertexShader,
+      fragmentShader: lineFragmentShader,
+      transparent: true,
+      blending: THREE.AdditiveBlending,
+      depthTest: false,
+      depthWrite: false
+    });
+
+    // -------------------------------------------------------------------------
+    // 随机树形：分层锥体 + 螺旋点缀 + 顶端星芒。
+    // 使用固定种子让每次打开都拥有稳定、可调的构图。
+    // -------------------------------------------------------------------------
+    function mulberry32(seed) {
+      return function random() {
+        let value = seed += 0x6D2B79F5;
+        value = Math.imul(value ^ value >>> 15, value | 1);
+        value ^= value + Math.imul(value ^ value >>> 7, value | 61);
+        return ((value ^ value >>> 14) >>> 0) / 4294967296;
+      };
+    }
+
+    const random = mulberry32(20261225);
+    const range = (min, max) => min + (max - min) * random();
+
+    const particleCount = CONFIG.particleCount;
+    const positions = new Float32Array(particleCount * 3);
+    const homes = new Float32Array(particleCount * 3);
+    const velocities = new Float32Array(particleCount * 3);
+    const scatterAmount = new Float32Array(particleCount);
+    const colorAttributes = new Float32Array(particleCount * 3);
+    const sizeAttributes = new Float32Array(particleCount);
+    const phaseAttributes = new Float32Array(particleCount);
+    const seedAttributes = new Float32Array(particleCount);
+    const opacityAttributes = new Float32Array(particleCount);
+
+    const palette = Object.fromEntries(
+      Object.entries(CONFIG.colors).map(([key, values]) => [
+        key,
+        values.map((hex) => new THREE.Color(hex))
+      ])
+    );
+
+    function pickColor(bucket) {
+      const colors = palette[bucket];
+      return colors[Math.floor(random() * colors.length)];
+    }
+
+    function setVertexColor(index, color, intensity) {
+      colorAttributes[index * 3] = color.r * intensity;
+      colorAttributes[index * 3 + 1] = color.g * intensity;
+      colorAttributes[index * 3 + 2] = color.b * intensity;
+    }
+
+    const starCount = 112;
+    const trunkCount = 46;
+    const bodyCount = particleCount - starCount - trunkCount;
+
+    for (let i = 0; i < particleCount; i++) {
+      let x;
+      let y;
+      let z;
+      let color;
+      let size;
+      let seed;
+      let intensity;
+
+      if (i < starCount) {
+        // 顶端五芒星由粒子构成，少量大尺寸粒子负责星芒核心。
+        const angle = random() * Math.PI * 2;
+        const ray = Math.pow(Math.max(0, Math.cos(angle * 2.5 + 0.25)), 7);
+        const radius = (0.07 + ray * 0.62) * Math.sqrt(random());
+        x = Math.cos(angle) * radius;
+        y = 5.07 + Math.sin(angle) * radius * 0.94;
+        z = (random() - 0.5) * 0.09;
+        color = pickColor(random() < 0.72 ? "gold" : "warmWhite");
+        size = random() < 0.025 ? 12 : range(5.0, 9.2);
+        seed = random() < 0.58 ? range(0.82, 1) : random() * 0.7;
+        intensity = range(0.62, 1.16);
+      } else if (i < starCount + trunkCount) {
+        // 树干与底部微光，不破坏整体锥形轮廓。
+        const angle = random() * Math.PI * 2;
+        const radius = Math.sqrt(random()) * range(0.18, 0.48);
+        x = Math.cos(angle) * radius;
+        y = range(-4.72, -4.04);
+        z = Math.sin(angle) * radius;
+        color = pickColor(random() < 0.7 ? "gold" : "christmasRed");
+        size = range(4.2, 7.8);
+        seed = random() * 0.73;
+        intensity = range(0.82, 1.58);
+      } else {
+        const bodyIndex = i - starCount - trunkCount;
+        // 下层周长更大，略提高底部采样比例，让整棵锥体密度更均匀。
+        const layer = Math.floor(Math.pow(random(), 1.18) * CONFIG.tree.layers);
+        const localV = Math.pow(random(), 0.92);
+        const globalT = (layer + localV) / CONFIG.tree.layers;
+        const yBase = CONFIG.tree.bottomY + globalT * CONFIG.tree.height;
+        const tierBulge = 0.79 + 0.21 * (1 - localV);
+        const coneRadius = CONFIG.tree.maxRadius * Math.pow(1 - globalT, 0.91) * tierBulge;
+        const isAccent = random() > 0.735;
+        const shell = random() < 0.73
+          ? 0.91 + random() * 0.115
+          : 0.56 + Math.sqrt(random()) * 0.35;
+        const radius = coneRadius * shell;
+        let angle = random() * Math.PI * 2;
+
+        // 部分彩饰沿螺旋线分布，让红金星光像环绕树身的彩带。
+        if (isAccent && random() < 0.48) {
+          angle = globalT * Math.PI * 10.5 + layer * 0.34 + range(-0.15, 0.15);
+        }
+
+        x = Math.cos(angle) * radius;
+        z = Math.sin(angle) * radius;
+        y = yBase + range(-0.045, 0.045);
+
+        // 在每层底部加少量边缘星，强化分层锥形轮廓。
+        if (bodyIndex % 13 === 0) {
+          y = CONFIG.tree.bottomY + (layer / CONFIG.tree.layers) * CONFIG.tree.height + 0.025;
+          const rimRadius = CONFIG.tree.maxRadius *
+            Math.pow(1 - layer / CONFIG.tree.layers, 0.91) * range(0.96, 1.0);
+          x = Math.cos(angle) * rimRadius;
+          z = Math.sin(angle) * rimRadius;
+        }
+
+        let bucket = "emerald";
+        if (isAccent) {
+          const accentRoll = random();
+          bucket = accentRoll < 0.39
+            ? "christmasRed"
+            : accentRoll < 0.79
+              ? "gold"
+              : "warmWhite";
+        }
+
+        color = pickColor(bucket);
+        const depthFade = 0.52 + shell * 0.62;
+        intensity = isAccent ? range(0.98, 1.82) : range(1.08, 2.02) * depthFade;
+        size = isAccent ? range(7.0, 12.6) : range(5.2, 10.1);
+        seed = random() < (isAccent ? 0.52 : 0.16) ? range(0.79, 1) : random() * 0.74;
+      }
+
+      const index3 = i * 3;
+      positions[index3] = x;
+      positions[index3 + 1] = y;
+      positions[index3 + 2] = z;
+      homes[index3] = x;
+      homes[index3 + 1] = y;
+      homes[index3 + 2] = z;
+      sizeAttributes[i] = size;
+      phaseAttributes[i] = random() * Math.PI * 2;
+      seedAttributes[i] = seed;
+      opacityAttributes[i] = 1;
+      setVertexColor(i, color, intensity);
+    }
+
+    const geometry = new THREE.BufferGeometry();
+    const positionAttribute = new THREE.BufferAttribute(positions, 3).setUsage(THREE.DynamicDrawUsage);
+    const colorAttribute = new THREE.BufferAttribute(colorAttributes, 3);
+    const sizeAttribute = new THREE.BufferAttribute(sizeAttributes, 1);
+    const phaseAttribute = new THREE.BufferAttribute(phaseAttributes, 1);
+    const seedAttribute = new THREE.BufferAttribute(seedAttributes, 1);
+    const opacityAttribute = new THREE.BufferAttribute(opacityAttributes, 1).setUsage(THREE.DynamicDrawUsage);
+
+    geometry.setAttribute("position", positionAttribute);
+    geometry.setAttribute("aColor", colorAttribute);
+    geometry.setAttribute("aSize", sizeAttribute);
+    geometry.setAttribute("aPhase", phaseAttribute);
+    geometry.setAttribute("aSeed", seedAttribute);
+    geometry.setAttribute("aOpacity", opacityAttribute);
+    geometry.setDrawRange(0, particleCount);
+
+    const treePoints = new THREE.Points(geometry, pointMaterial);
+    treePoints.frustumCulled = false;
+    treePoints.renderOrder = 2;
+    treeGroup.add(treePoints);
+
+    // 同源粒子拖尾：两端点构成一条短流线，仅对高速粒子显示。
+    const trailPositions = new Float32Array(particleCount * 6);
+    const trailColors = new Float32Array(particleCount * 6);
+    const trailAlphas = new Float32Array(particleCount * 2);
+
+    for (let i = 0; i < particleCount; i++) {
+      const c = i * 3;
+      const l = i * 6;
+      trailPositions[l] = positions[c];
+      trailPositions[l + 1] = positions[c + 1];
+      trailPositions[l + 2] = positions[c + 2];
+      trailPositions[l + 3] = positions[c];
+      trailPositions[l + 4] = positions[c + 1];
+      trailPositions[l + 5] = positions[c + 2];
+      trailColors[l] = colorAttributes[c];
+      trailColors[l + 1] = colorAttributes[c + 1];
+      trailColors[l + 2] = colorAttributes[c + 2];
+      trailColors[l + 3] = colorAttributes[c];
+      trailColors[l + 4] = colorAttributes[c + 1];
+      trailColors[l + 5] = colorAttributes[c + 2];
+    }
+
+    const trailGeometry = new THREE.BufferGeometry();
+    const trailPositionAttribute = new THREE.BufferAttribute(trailPositions, 3).setUsage(THREE.DynamicDrawUsage);
+    const trailAlphaAttribute = new THREE.BufferAttribute(trailAlphas, 1).setUsage(THREE.DynamicDrawUsage);
+    trailGeometry.setAttribute("position", trailPositionAttribute);
+    trailGeometry.setAttribute("aColor", new THREE.BufferAttribute(trailColors, 3));
+    trailGeometry.setAttribute("aAlpha", trailAlphaAttribute);
+    trailGeometry.setDrawRange(0, particleCount * 2);
+
+    const treeTrails = new THREE.LineSegments(trailGeometry, lineMaterial);
+    treeTrails.frustumCulled = false;
+    treeTrails.renderOrder = 1;
+    treeGroup.add(treeTrails);
+
+    // -------------------------------------------------------------------------
+    // 独立星火池：烟花、爆裂星点、划动光痕、比心星环共用。
+    // -------------------------------------------------------------------------
+    const sparkCount = CONFIG.sparkPoolSize;
+    const sparkStates = Array.from({ length: sparkCount }, () => ({
+      active: false,
+      x: 0,
+      y: -999,
+      z: 0,
+      vx: 0,
+      vy: 0,
+      vz: 0,
+      life: 0,
+      maxLife: 1,
+      gravity: 1,
+      drag: 0.5
+    }));
+    const sparkPositions = new Float32Array(sparkCount * 3);
+    const sparkColors = new Float32Array(sparkCount * 3);
+    const sparkSizes = new Float32Array(sparkCount);
+    const sparkPhases = new Float32Array(sparkCount);
+    const sparkSeeds = new Float32Array(sparkCount);
+    const sparkOpacities = new Float32Array(sparkCount);
+    const sparkTrailPositions = new Float32Array(sparkCount * 6);
+    const sparkTrailColors = new Float32Array(sparkCount * 6);
+    const sparkTrailAlphas = new Float32Array(sparkCount * 2);
+    let sparkCursor = 0;
+
+    for (let i = 0; i < sparkCount; i++) {
+      sparkPositions[i * 3 + 1] = -999;
+      sparkTrailPositions[i * 6 + 1] = -999;
+      sparkTrailPositions[i * 6 + 4] = -999;
+      sparkSizes[i] = 7;
+      sparkSeeds[i] = 0.85;
+    }
+
+    const sparkGeometry = new THREE.BufferGeometry();
+    const sparkPositionAttribute = new THREE.BufferAttribute(sparkPositions, 3).setUsage(THREE.DynamicDrawUsage);
+    const sparkColorAttribute = new THREE.BufferAttribute(sparkColors, 3).setUsage(THREE.DynamicDrawUsage);
+    const sparkSizeAttribute = new THREE.BufferAttribute(sparkSizes, 1).setUsage(THREE.DynamicDrawUsage);
+    const sparkPhaseAttribute = new THREE.BufferAttribute(sparkPhases, 1).setUsage(THREE.DynamicDrawUsage);
+    const sparkSeedAttribute = new THREE.BufferAttribute(sparkSeeds, 1).setUsage(THREE.DynamicDrawUsage);
+    const sparkOpacityAttribute = new THREE.BufferAttribute(sparkOpacities, 1).setUsage(THREE.DynamicDrawUsage);
+    sparkGeometry.setAttribute("position", sparkPositionAttribute);
+    sparkGeometry.setAttribute("aColor", sparkColorAttribute);
+    sparkGeometry.setAttribute("aSize", sparkSizeAttribute);
+    sparkGeometry.setAttribute("aPhase", sparkPhaseAttribute);
+    sparkGeometry.setAttribute("aSeed", sparkSeedAttribute);
+    sparkGeometry.setAttribute("aOpacity", sparkOpacityAttribute);
+    sparkGeometry.setDrawRange(0, sparkCount);
+
+    const sparkPoints = new THREE.Points(sparkGeometry, pointMaterial);
+    sparkPoints.frustumCulled = false;
+    sparkPoints.renderOrder = 5;
+    treeGroup.add(sparkPoints);
+
+    const sparkTrailGeometry = new THREE.BufferGeometry();
+    const sparkTrailPositionAttribute = new THREE.BufferAttribute(sparkTrailPositions, 3).setUsage(THREE.DynamicDrawUsage);
+    const sparkTrailColorAttribute = new THREE.BufferAttribute(sparkTrailColors, 3).setUsage(THREE.DynamicDrawUsage);
+    const sparkTrailAlphaAttribute = new THREE.BufferAttribute(sparkTrailAlphas, 1).setUsage(THREE.DynamicDrawUsage);
+    sparkTrailGeometry.setAttribute("position", sparkTrailPositionAttribute);
+    sparkTrailGeometry.setAttribute("aColor", sparkTrailColorAttribute);
+    sparkTrailGeometry.setAttribute("aAlpha", sparkTrailAlphaAttribute);
+    sparkTrailGeometry.setDrawRange(0, sparkCount * 2);
+
+    const sparkTrails = new THREE.LineSegments(sparkTrailGeometry, lineMaterial);
+    sparkTrails.frustumCulled = false;
+    sparkTrails.renderOrder = 4;
+    treeGroup.add(sparkTrails);
+
+    function chooseSparkColor() {
+      const roll = random();
+      if (roll < 0.34) return pickColor("gold");
+      if (roll < 0.65) return pickColor("warmWhite");
+      if (roll < 0.84) return pickColor("christmasRed");
+      return pickColor("emerald");
+    }
+
+    function spawnSpark(x, y, z, vx, vy, vz, color, life, size, gravity = 1, drag = 0.55) {
+      const index = sparkCursor;
+      sparkCursor = (sparkCursor + 1) % sparkCount;
+      const state = sparkStates[index];
+      state.active = true;
+      state.x = x;
+      state.y = y;
+      state.z = z;
+      state.vx = vx;
+      state.vy = vy;
+      state.vz = vz;
+      state.life = life;
+      state.maxLife = life;
+      state.gravity = gravity;
+      state.drag = drag;
+
+      const i3 = index * 3;
+      sparkPositions[i3] = x;
+      sparkPositions[i3 + 1] = y;
+      sparkPositions[i3 + 2] = z;
+      sparkColors[i3] = color.r * 2.9;
+      sparkColors[i3 + 1] = color.g * 2.9;
+      sparkColors[i3 + 2] = color.b * 2.9;
+      sparkSizes[index] = size;
+      sparkPhases[index] = random() * Math.PI * 2;
+      sparkSeeds[index] = random() < 0.72 ? range(0.8, 1) : random() * 0.7;
+      sparkOpacities[index] = 1;
+    }
+
+    function spawnRadialSparks(center, count, speedMin, speedMax, lifeMin, lifeMax, spread = 1) {
+      for (let i = 0; i < count; i++) {
+        const azimuth = random() * Math.PI * 2;
+        const vertical = (random() - 0.5) * spread;
+        const radial = Math.sqrt(Math.max(0, 1 - vertical * vertical * 0.3));
+        const speed = range(speedMin, speedMax);
+        const vx = Math.cos(azimuth) * radial * speed;
+        const vy = Math.sin(azimuth) * radial * speed + 0.35;
+        const vz = vertical * speed * 0.65 + range(-0.65, 0.65);
+        spawnSpark(
+          center.x,
+          center.y,
+          center.z,
+          vx,
+          vy,
+          vz,
+          chooseSparkColor(),
+          range(lifeMin, lifeMax),
+          range(6.4, 12.6),
+          range(0.65, 1.25),
+          range(0.38, 0.68)
+        );
+      }
+    }
+
+    // -------------------------------------------------------------------------
+    // 交互状态。
+    // -------------------------------------------------------------------------
+    const interaction = {
+      palmFields: [],
+      pairField: null,
+      collect: 0,
+      collectTarget: 0,
+      burstGlow: 0,
+      heartGlow: 0,
+      heartStartedAt: -100,
+      handActivity: 0,
+      swipeWaves: []
+    };
+
+    function triggerExplosion(center) {
+      const cx = center.x;
+      const cy = center.y;
+      const cz = center.z;
+
+      for (let i = 0; i < particleCount; i++) {
+        const i3 = i * 3;
+        const dx = positions[i3] - cx;
+        const dy = positions[i3 + 1] - cy;
+        const dz = positions[i3 + 2] - cz;
+        const length = Math.max(0.22, Math.hypot(dx, dy, dz));
+        const nx = dx / length;
+        const ny = dy / length;
+        const nz = dz / length;
+        const speed = range(CONFIG.burst.speedMin, CONFIG.burst.speedMax);
+        const layerBoost = 1.0 + Math.max(0, positions[i3 + 1] - CONFIG.tree.bottomY) * 0.028;
+
+        velocities[i3] += nx * speed * layerBoost + range(-1, 1) * CONFIG.burst.randomness;
+        velocities[i3 + 1] += ny * speed * 0.8 + CONFIG.burst.upwardBias + range(-1, 1) * CONFIG.burst.randomness;
+        velocities[i3 + 2] += nz * speed + range(-1, 1) * CONFIG.burst.randomness * 1.35;
+        scatterAmount[i] = 1;
+      }
+
+      for (let i = 0; i < 160; i++) {
+        const sourceIndex = Math.floor(random() * particleCount) * 3;
+        const dx = positions[sourceIndex] - cx;
+        const dy = positions[sourceIndex + 1] - cy;
+        const dz = positions[sourceIndex + 2] - cz;
+        const length = Math.max(0.2, Math.hypot(dx, dy, dz));
+        const speed = range(2.1, 7.2);
+        spawnSpark(
+          positions[sourceIndex],
+          positions[sourceIndex + 1],
+          positions[sourceIndex + 2],
+          dx / length * speed + range(-0.8, 0.8),
+          dy / length * speed + range(0.2, 1.2),
+          dz / length * speed + range(-0.8, 0.8),
+          chooseSparkColor(),
+          range(1.2, 2.8),
+          range(6.2, 12.2),
+          0.82,
+          0.4
+        );
+      }
+
+      interaction.burstGlow = 1;
+    }
+
+    function pushAtPoint(point, radius, strength, direction = null) {
+      for (let i = 0; i < particleCount; i++) {
+        const i3 = i * 3;
+        const dx = positions[i3] - point.x;
+        const dy = positions[i3 + 1] - point.y;
+        const dz = positions[i3 + 2] - point.z;
+        const distance = Math.hypot(dx, dy, dz);
+        if (distance >= radius || distance < 0.0001) continue;
+        const influence = Math.pow(1 - distance / radius, 2);
+
+        if (direction) {
+          velocities[i3] += direction.x * strength * influence;
+          velocities[i3 + 1] += direction.y * strength * influence;
+          velocities[i3 + 2] += direction.z * strength * influence;
+        }
+
+        velocities[i3] += (dx / distance) * strength * 0.42 * influence;
+        velocities[i3 + 1] += (dy / distance) * strength * 0.42 * influence;
+        velocities[i3 + 2] += (dz / distance) * strength * 0.42 * influence;
+        scatterAmount[i] = Math.max(scatterAmount[i], 0.42 * influence + 0.12);
+      }
+    }
+
+    function triggerFirework(center) {
+      spawnRadialSparks(center, 116, 2.0, 5.8, 1.1, 2.3, 1.25);
+      for (let i = 0; i < 14; i++) {
+        spawnSpark(
+          center.x,
+          center.y,
+          center.z,
+          range(-0.75, 0.75),
+          range(-0.75, 0.75),
+          range(-0.75, 0.75),
+          pickColor("warmWhite"),
+          range(0.28, 0.62),
+          range(12, 20),
+          0.1,
+          1.2
+        );
+      }
+      pushAtPoint(center, CONFIG.force.fireworkPushRadius, CONFIG.force.fireworkPush);
+      interaction.burstGlow = Math.max(interaction.burstGlow, 0.72);
+    }
+
+    function triggerSwipe(start, end, direction) {
+      const dx = end.x - start.x;
+      const dy = end.y - start.y;
+      const dz = end.z - start.z;
+      const length = Math.hypot(dx, dy, dz);
+
+      for (let s = 0; s < 6; s++) {
+        const t = s / 5;
+        const point = {
+          x: THREE.MathUtils.lerp(start.x, end.x, t),
+          y: THREE.MathUtils.lerp(start.y, end.y, t),
+          z: THREE.MathUtils.lerp(start.z, end.z, t)
+        };
+        pushAtPoint(point, CONFIG.force.swipeRadius, CONFIG.force.swipeStrength, direction);
+      }
+
+      const sparkCountAlongPath = 54;
+      for (let i = 0; i < sparkCountAlongPath; i++) {
+        const t = random();
+        const x = THREE.MathUtils.lerp(start.x, end.x, t);
+        const y = THREE.MathUtils.lerp(start.y, end.y, t) + range(-0.18, 0.18);
+        const z = THREE.MathUtils.lerp(start.z, end.z, t) + range(-0.4, 0.4);
+        spawnSpark(
+          x,
+          y,
+          z,
+          direction.x * range(1.6, 4.5) + range(-0.45, 0.45),
+          direction.y * range(1.6, 4.5) + range(-0.45, 0.45),
+          direction.z * range(1.6, 4.5) + range(-0.35, 0.35),
+          chooseSparkColor(),
+          range(1.2, 2.5),
+          range(6.2, 12),
+          0.2,
+          0.38
+        );
+      }
+
+      if (length > 0.001) {
+        interaction.swipeWaves.push({
+          start: { ...start },
+          end: { ...end },
+          life: 0.42
+        });
+      }
+    }
+
+    function triggerHeart(center) {
+      interaction.heartGlow = 1;
+      interaction.heartStartedAt = performance.now() / 1000;
+
+      for (let i = 0; i < 240; i++) {
+        const angle = random() * Math.PI * 2;
+        const radius = range(0.35, 1.35);
+        const x = center.x + Math.cos(angle) * radius;
+        const y = center.y + Math.sin(angle) * radius * 0.78;
+        const z = center.z + range(-0.55, 0.55);
+        const speed = range(0.9, 2.8);
+        spawnSpark(
+          x,
+          y,
+          z,
+          Math.cos(angle) * speed,
+          Math.sin(angle) * speed,
+          range(-0.45, 0.45),
+          i % 7 === 0 ? pickColor("christmasRed") : (i % 3 === 0 ? pickColor("emerald") : pickColor("gold")),
+          range(1.5, 3.0),
+          range(6.2, 12.2),
+          0.08,
+          0.42
+        );
+      }
+
+      pushAtPoint(center, 7.8, 1.55);
+    }
+
+    // -------------------------------------------------------------------------
+    // MediaPipe Hands：关键点平滑 + 手势投票 + 事件冷却。
+    // -------------------------------------------------------------------------
+    const trackedHands = new Map();
+    let handsModel = null;
+    let handsSending = false;
+    let lastHandFrameAt = 0;
+    let handsErrorCount = 0;
+
+    const landmarkIndex = {
+      wrist: 0,
+      thumbTip: 4,
+      indexMcp: 5,
+      indexPip: 6,
+      indexTip: 8,
+      middleMcp: 9,
+      middlePip: 10,
+      middleTip: 12,
+      ringMcp: 13,
+      ringPip: 14,
+      ringTip: 16,
+      pinkyMcp: 17,
+      pinkyPip: 18,
+      pinkyTip: 20
+    };
+
+    function landmarkDistance(a, b) {
+      const dx = a.x - b.x;
+      const dy = a.y - b.y;
+      const dz = (a.z || 0) - (b.z || 0);
+      return Math.sqrt(dx * dx + dy * dy + dz * dz);
+    }
+
+    function smoothLandmarks(previous, current, speed) {
+      const alpha = THREE.MathUtils.clamp(0.25 + speed * 3.4, 0.25, 0.7);
+      if (!previous) return current.map((point) => ({ x: point.x, y: point.y, z: point.z || 0 }));
+      return current.map((point, index) => {
+        const old = previous[index];
+        return {
+          x: THREE.MathUtils.lerp(old.x, point.x, alpha),
+          y: THREE.MathUtils.lerp(old.y, point.y, alpha),
+          z: THREE.MathUtils.lerp(old.z, point.z || 0, alpha)
+        };
+      });
+    }
+
+    function classifyGesture(landmarks, palmScale) {
+      const wrist = landmarks[landmarkIndex.wrist];
+      const tips = [
+        landmarkIndex.indexTip,
+        landmarkIndex.middleTip,
+        landmarkIndex.ringTip,
+        landmarkIndex.pinkyTip
+      ];
+      const pips = [
+        landmarkIndex.indexPip,
+        landmarkIndex.middlePip,
+        landmarkIndex.ringPip,
+        landmarkIndex.pinkyPip
+      ];
+
+      const extended = tips.map((tip, index) => {
+        const tipDistance = landmarkDistance(wrist, landmarks[tip]);
+        const pipDistance = landmarkDistance(wrist, landmarks[pips[index]]);
+        return tipDistance > pipDistance * 1.075 + palmScale * 0.025;
+      });
+      const extendedCount = extended.filter(Boolean).length;
+      const pinch = landmarkDistance(
+        landmarks[landmarkIndex.thumbTip],
+        landmarks[landmarkIndex.indexTip]
+      ) < palmScale * 0.53;
+
+      if (pinch && extendedCount <= 2) return "pinch";
+      if (extendedCount >= 4) return "open";
+      if (extended[0] && !extended[1] && !extended[2] && !extended[3]) return "point";
+      if (extendedCount === 0) return "fist";
+      return "neutral";
+    }
+
+    function projectLandmarkToLocal(landmark, zScale = 9.5) {
+      camera.updateMatrixWorld();
+      const mirroredX = 1 - landmark.x;
+      tempVector.set(mirroredX * 2 - 1, -(landmark.y * 2 - 1), 0.18);
+      tempVector.unproject(camera);
+      const direction = tempVector.sub(camera.position).normalize();
+      const distanceToPlane = -camera.position.z / direction.z;
+      tempWorld.copy(camera.position).addScaledVector(direction, distanceToPlane);
+      tempWorld.z = THREE.MathUtils.clamp(-(landmark.z || 0) * zScale, -1.8, 1.8);
+      treeGroup.updateMatrixWorld();
+      return treeGroup.worldToLocal(tempWorld.clone());
+    }
+
+    function palmCenterLandmark(landmarks) {
+      const center = { x: 0, y: 0, z: 0 };
+      const ids = [
+        landmarkIndex.wrist,
+        landmarkIndex.indexMcp,
+        landmarkIndex.middleMcp,
+        landmarkIndex.ringMcp,
+        landmarkIndex.pinkyMcp
+      ];
+      for (const id of ids) {
+        center.x += landmarks[id].x / ids.length;
+        center.y += landmarks[id].y / ids.length;
+        center.z += (landmarks[id].z || 0) / ids.length;
+      }
+      return center;
+    }
+
+    function updateStableGesture(hand, candidate) {
+      if (candidate === hand.pendingGesture) {
+        hand.pendingFrames++;
+      } else {
+        hand.pendingGesture = candidate;
+        hand.pendingFrames = 1;
+      }
+      if (hand.pendingFrames >= 3) {
+        hand.gesture = candidate;
+      }
+    }
+
+    function rememberSwipePoint(hand, now, rawPalm, localPalm) {
+      hand.swipeHistory.push({
+        t: now,
+        x: 1 - rawPalm.x,
+        y: rawPalm.y,
+        local: { x: localPalm.x, y: localPalm.y, z: localPalm.z }
+      });
+      while (hand.swipeHistory.length > 2 && now - hand.swipeHistory[0].t > 360) {
+        hand.swipeHistory.shift();
+      }
+    }
+
+    function detectSwipe(hand, now) {
+      if (now - hand.lastSwipeAt < 1050 || hand.swipeHistory.length < 2) return;
+      const first = hand.swipeHistory[0];
+      const last = hand.swipeHistory[hand.swipeHistory.length - 1];
+      const deltaSeconds = Math.max(0.02, (last.t - first.t) / 1000);
+      const dx = last.x - first.x;
+      const dy = last.y - first.y;
+      const horizontalSpeed = Math.abs(dx) / deltaSeconds;
+
+      if (Math.abs(dx) > 0.145 && horizontalSpeed > 0.82 && Math.abs(dx) > Math.abs(dy) * 1.35) {
+        const directionLength = Math.hypot(
+          last.local.x - first.local.x,
+          last.local.y - first.local.y,
+          last.local.z - first.local.z
+        );
+        if (directionLength > 0.04) {
+          const direction = {
+            x: (last.local.x - first.local.x) / directionLength,
+            y: (last.local.y - first.local.y) / directionLength,
+            z: (last.local.z - first.local.z) / directionLength
+          };
+          triggerSwipe(first.local, last.local, direction);
+          hand.lastSwipeAt = now;
+          hand.swipeHistory.length = 0;
+        }
+      }
+    }
+
+    function processSingleHandEvents(hand, now) {
+      const activeHands = [...trackedHands.values()].filter((item) => now - item.lastSeen < 280);
+      if (activeHands.length !== 1 || hand !== activeHands[0]) return;
+
+      detectSwipe(hand, now);
+
+      if (hand.gesture === "open") {
+        if (!hand.openLatched && now - hand.lastOpenAt > 1900) {
+          triggerExplosion(hand.palmLocal);
+          hand.lastOpenAt = now;
+        }
+        hand.openLatched = true;
+      } else if (hand.gesture === "fist" || hand.gesture === "neutral") {
+        hand.openLatched = false;
+      }
+
+      if (hand.gesture === "point" && now - hand.lastPointAt > 1120) {
+        triggerFirework(hand.indexTipLocal);
+        hand.lastPointAt = now;
+      }
+    }
+
+    let heartCandidateFrames = 0;
+    let lastHeartAt = -10000;
+
+    function processTwoHandEvents(hands, now) {
+      const a = hands[0];
+      const b = hands[1];
+      const pinchCenterA = {
+        x: (a.smooth[3].x + a.smooth[4].x + a.smooth[7].x + a.smooth[8].x) * 0.25,
+        y: (a.smooth[3].y + a.smooth[4].y + a.smooth[7].y + a.smooth[8].y) * 0.25,
+        z: ((a.smooth[3].z || 0) + (a.smooth[4].z || 0) + (a.smooth[7].z || 0) + (a.smooth[8].z || 0)) * 0.25
+      };
+      const pinchCenterB = {
+        x: (b.smooth[3].x + b.smooth[4].x + b.smooth[7].x + b.smooth[8].x) * 0.25,
+        y: (b.smooth[3].y + b.smooth[4].y + b.smooth[7].y + b.smooth[8].y) * 0.25,
+        z: ((b.smooth[3].z || 0) + (b.smooth[4].z || 0) + (b.smooth[7].z || 0) + (b.smooth[8].z || 0)) * 0.25
+      };
+      const pinchA = landmarkDistance(a.smooth[4], a.smooth[8]) < a.palmScale * 0.56;
+      const pinchB = landmarkDistance(b.smooth[4], b.smooth[8]) < b.palmScale * 0.56;
+      const pinchDistance = landmarkDistance(pinchCenterA, pinchCenterB);
+      const handDistance = landmarkDistance(a.smooth[9], b.smooth[9]);
+      const heartShape = pinchA && pinchB && pinchDistance < 0.17 && handDistance < 0.52;
+
+      heartCandidateFrames = heartShape ? heartCandidateFrames + 1 : 0;
+      if (heartCandidateFrames >= 4 && now - lastHeartAt > 4200) {
+        lastHeartAt = now;
+        const center = {
+          x: (a.palmLocal.x + b.palmLocal.x) * 0.5,
+          y: (a.palmLocal.y + b.palmLocal.y) * 0.5,
+          z: (a.palmLocal.z + b.palmLocal.z) * 0.5
+        };
+        triggerHeart(center);
+        heartCandidateFrames = 0;
+      }
+    }
+
+    function handleHandResults(results) {
+      const now = performance.now();
+      const detections = results.multiHandLandmarks || [];
+      const handedness = results.multiHandedness || [];
+
+      for (let index = 0; index < detections.length; index++) {
+        const raw = detections[index];
+        const label = handedness[index]?.label || `hand-${index}`;
+        let hand = trackedHands.get(label);
+        if (!hand) {
+          hand = {
+            label,
+            smooth: raw.map((point) => ({ x: point.x, y: point.y, z: point.z || 0 })),
+            previousRaw: raw.map((point) => ({ x: point.x, y: point.y, z: point.z || 0 })),
+            lastSeen: now,
+            gesture: "neutral",
+            pendingGesture: "neutral",
+            pendingFrames: 0,
+            palmLocal: new THREE.Vector3(),
+            previousPalmLocal: new THREE.Vector3(),
+            palmVelocity: new THREE.Vector3(),
+            indexTipLocal: new THREE.Vector3(),
+            palmScale: 0.1,
+            pinch: false,
+            openLatched: false,
+            lastOpenAt: -10000,
+            lastPointAt: -10000,
+            lastSwipeAt: -10000,
+            lastResultAt: now,
+            swipeHistory: []
+          };
+          trackedHands.set(label, hand);
+        }
+
+        const resultDt = Math.max(0.016, Math.min(0.12, (now - hand.lastResultAt) / 1000));
+        const rawSpeed = landmarkDistance(raw[9], hand.previousRaw[9]);
+        hand.smooth = smoothLandmarks(hand.smooth, raw, rawSpeed);
+        hand.previousRaw = raw.map((point) => ({ x: point.x, y: point.y, z: point.z || 0 }));
+        hand.lastSeen = now;
+        hand.lastResultAt = now;
+        hand.palmScale = Math.max(
+          0.025,
+          landmarkDistance(raw[landmarkIndex.wrist], raw[landmarkIndex.middleMcp])
+        );
+
+        const rawPalm = palmCenterLandmark(raw);
+        const palmLocal = projectLandmarkToLocal(rawPalm);
+        hand.previousPalmLocal.copy(hand.palmLocal);
+        hand.palmLocal.copy(palmLocal);
+        if (hand.previousPalmLocal.lengthSq() === 0) hand.previousPalmLocal.copy(palmLocal);
+        hand.palmVelocity.copy(palmLocal).sub(hand.previousPalmLocal).divideScalar(resultDt);
+        hand.indexTipLocal.copy(projectLandmarkToLocal(hand.smooth[landmarkIndex.indexTip]));
+
+        const candidate = classifyGesture(hand.smooth, hand.palmScale);
+        hand.pinch = landmarkDistance(
+          hand.smooth[landmarkIndex.thumbTip],
+          hand.smooth[landmarkIndex.indexTip]
+        ) < hand.palmScale * 0.56;
+        updateStableGesture(hand, candidate);
+        rememberSwipePoint(hand, now, rawPalm, palmLocal);
+      }
+
+      for (const [label, hand] of trackedHands) {
+        if (now - hand.lastSeen > 420) trackedHands.delete(label);
+      }
+
+      const activeHands = [...trackedHands.values()].filter((hand) => now - hand.lastSeen < 280);
+      interaction.palmFields.length = 0;
+      interaction.pairField = null;
+      interaction.collectTarget = 0;
+
+      if (activeHands.length >= 2) {
+        processTwoHandEvents(activeHands, now);
+        interaction.pairField = {
+          a: activeHands[0].palmLocal,
+          b: activeHands[1].palmLocal
+        };
+        interaction.palmFields.push(
+          {
+            center: activeHands[0].palmLocal,
+            velocity: activeHands[0].palmVelocity,
+            strength: 0.56,
+            gesture: activeHands[0].gesture
+          },
+          {
+            center: activeHands[1].palmLocal,
+            velocity: activeHands[1].palmVelocity,
+            strength: 0.56,
+            gesture: activeHands[1].gesture
+          }
+        );
+      } else if (activeHands.length === 1) {
+        heartCandidateFrames = 0;
+        const hand = activeHands[0];
+        processSingleHandEvents(hand, now);
+        if (hand.gesture === "fist") {
+          interaction.collectTarget = 1;
+        } else {
+          interaction.palmFields.push({
+            center: hand.palmLocal,
+            velocity: hand.palmVelocity,
+            strength: hand.gesture === "open" ? 1.05 : 0.82,
+            gesture: hand.gesture
+          });
+        }
+      } else {
+        heartCandidateFrames = 0;
+      }
+    }
+
+    // -------------------------------------------------------------------------
+    // 摄像头初始化。失败时只显示一条状态提示，树体持续自动展示。
+    // -------------------------------------------------------------------------
+    async function initializeHandTracking() {
+      if (!navigator.mediaDevices?.getUserMedia) {
+        showNotice("当前浏览器无法访问摄像头。请使用较新的 Chrome / Edge 打开本文件。", 0);
+        return;
+      }
+      if (window.__handsLoadFailed || typeof window.Hands === "undefined") {
+        showNotice("手势识别 CDN 未加载，圣诞树仍会自动展示。请联网后刷新。", 9000);
+        return;
+      }
+
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          audio: false,
+          video: {
+            facingMode: "user",
+            width: { ideal: 1280 },
+            height: { ideal: 720 },
+            frameRate: { ideal: 30, max: 30 }
+          }
+        });
+        video.srcObject = stream;
+        await new Promise((resolve) => {
+          if (video.readyState >= 1) {
+            resolve();
+          } else {
+            video.addEventListener("loadedmetadata", resolve, { once: true });
+          }
+        });
+        await video.play();
+
+        handsModel = new window.Hands({
+          locateFile: (file) =>
+            `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/${file}`
+        });
+        handsModel.setOptions({
+          maxNumHands: 2,
+          modelComplexity: 1,
+          minDetectionConfidence: 0.64,
+          minTrackingConfidence: 0.67
+        });
+        handsModel.onResults(handleHandResults);
+        video.requestVideoFrameCallback?.(pumpHands);
+        if (!video.requestVideoFrameCallback) requestAnimationFrame(pumpHands);
+      } catch (error) {
+        console.warn("Camera / MediaPipe initialization failed:", error);
+        if (error?.name === "NotAllowedError" || error?.name === "PermissionDeniedError") {
+          showNotice("摄像头未授权。请在地址栏允许摄像头后刷新页面；圣诞树目前会自动展示。", 0);
+        } else {
+          showNotice("摄像头启动失败，圣诞树仍会自动展示。请检查设备占用或浏览器权限。", 9000);
+        }
+      }
+    }
+
+    function pumpHands(now = performance.now()) {
+      if (video.requestVideoFrameCallback) video.requestVideoFrameCallback(pumpHands);
+      else requestAnimationFrame(pumpHands);
+
+      if (
+        document.hidden ||
+        !handsModel ||
+        handsSending ||
+        video.readyState < 2 ||
+        now - lastHandFrameAt < 32
+      ) {
+        return;
+      }
+
+      handsSending = true;
+      lastHandFrameAt = now;
+      handsModel.send({ image: video })
+        .catch((error) => {
+          handsErrorCount++;
+          if (handsErrorCount === 1) console.warn("MediaPipe frame send failed:", error);
+        })
+        .finally(() => {
+          handsSending = false;
+        });
+    }
+
+    // -------------------------------------------------------------------------
+    // 粒子物理：弹簧归位、旋涡场、双手拉伸、重力与空气阻力。
+    // 使用可变帧率 dt，避免掉帧时状态突然发散。
+    // -------------------------------------------------------------------------
+    function updateParticlePhysics(dt, elapsed) {
+      const collectTarget = interaction.collectTarget;
+      const collectMix = 1 - Math.exp(-dt * (collectTarget > interaction.collect ? 7.5 : 3.4));
+      interaction.collect += (collectTarget - interaction.collect) * collectMix;
+      interaction.collect = THREE.MathUtils.clamp(interaction.collect, 0, 1);
+
+      const springBase = CONFIG.force.idleSpring;
+      const springCollect = CONFIG.force.collectSpring;
+      const gravity = CONFIG.force.gravity;
+      const dragBase = CONFIG.force.airDrag;
+      const palmRadiusSq = CONFIG.force.palmRadius * CONFIG.force.palmRadius;
+      const pairRadiusSq = CONFIG.force.twoHandRadius * CONFIG.force.twoHandRadius;
+      const floor = CONFIG.force.floorY;
+
+      const pairSegment = { ax: 0, ay: 0, az: 0, bx: 0, by: 0, bz: 0, abx: 0, aby: 0, abz: 0, lengthSq: 1 };
+      if (interaction.pairField) {
+        const a = interaction.pairField.a;
+        const b = interaction.pairField.b;
+        pairSegment.ax = a.x;
+        pairSegment.ay = a.y;
+        pairSegment.az = a.z;
+        pairSegment.abx = b.x - a.x;
+        pairSegment.aby = b.y - a.y;
+        pairSegment.abz = b.z - a.z;
+        pairSegment.lengthSq = Math.max(
+          0.05,
+          pairSegment.abx * pairSegment.abx +
+          pairSegment.aby * pairSegment.aby +
+          pairSegment.abz * pairSegment.abz
+        );
+      }
+
+      for (let i = 0; i < particleCount; i++) {
+        const i3 = i * 3;
+        let x = positions[i3];
+        let y = positions[i3 + 1];
+        let z = positions[i3 + 2];
+        let vx = velocities[i3];
+        let vy = velocities[i3 + 1];
+        let vz = velocities[i3 + 2];
+        const scatter = scatterAmount[i];
+
+        const homeDx = homes[i3] - x;
+        const homeDy = homes[i3 + 1] - y;
+        const homeDz = homes[i3 + 2] - z;
+        const idleSpring = springBase * (1 - scatter * 0.76);
+        const spring = idleSpring + interaction.collect * springCollect;
+        vx += homeDx * spring * dt;
+        vy += homeDy * spring * dt;
+        vz += homeDz * spring * dt;
+
+        if (interaction.collect < 0.22) {
+          vy -= gravity * scatter * dt;
+        }
+
+        // 手掌旋涡与流场：不是直接拉单点，而是以平滑衰减影响周边粒子。
+        for (let p = 0; p < interaction.palmFields.length; p++) {
+          const field = interaction.palmFields[p];
+          const dx = x - field.center.x;
+          const dy = y - field.center.y;
+          const dz = z - field.center.z;
+          const distanceSq = dx * dx + dy * dy + dz * dz;
+          if (distanceSq > palmRadiusSq || distanceSq < 0.0001) continue;
+          const normalized = 1 - Math.sqrt(distanceSq) / CONFIG.force.palmRadius;
+          const influence = normalized * normalized * field.strength;
+
+          vx += (-dy * CONFIG.force.palmVortex + dx * CONFIG.force.palmPull) * influence * dt;
+          vy += (dx * CONFIG.force.palmVortex + dy * CONFIG.force.palmPull) * influence * dt;
+          vz += (Math.sin(dy * 2.1 + elapsed * 1.3) * 1.1 - dz * 0.45) * influence * dt;
+
+          vx += field.velocity.x * CONFIG.force.palmFlowGain * influence * dt;
+          vy += field.velocity.y * CONFIG.force.palmFlowGain * influence * dt;
+          vz += field.velocity.z * CONFIG.force.palmFlowGain * influence * dt;
+          scatterAmount[i] = Math.max(scatterAmount[i], influence * 0.08);
+        }
+
+        // 双手之间的桥接场：沿两手连线拉伸，同时向连线收束，形成流体桥。
+        if (interaction.pairField) {
+          const px = x - pairSegment.ax;
+          const py = y - pairSegment.ay;
+          const pz = z - pairSegment.az;
+          const t = THREE.MathUtils.clamp(
+            (px * pairSegment.abx + py * pairSegment.aby + pz * pairSegment.abz) /
+              pairSegment.lengthSq,
+            0,
+            1
+          );
+          const closestX = pairSegment.ax + pairSegment.abx * t;
+          const closestY = pairSegment.ay + pairSegment.aby * t;
+          const closestZ = pairSegment.az + pairSegment.abz * t;
+          const dx = x - closestX;
+          const dy = y - closestY;
+          const dz = z - closestZ;
+          const distanceSq = dx * dx + dy * dy + dz * dz;
+          if (distanceSq < pairRadiusSq) {
+            const distance = Math.max(0.02, Math.sqrt(distanceSq));
+            const influence = Math.pow(1 - distance / CONFIG.force.twoHandRadius, 2);
+            const directionSign = (x - (pairSegment.ax + pairSegment.abx * 0.5)) >= 0 ? 1 : -1;
+            const pairLength = Math.sqrt(pairSegment.lengthSq);
+            vx += (pairSegment.abx / pairLength) * directionSign * CONFIG.force.twoHandBridge * influence * dt;
+            vy += (pairSegment.aby / pairLength) * directionSign * CONFIG.force.twoHandBridge * influence * dt;
+            vz += (pairSegment.abz / pairLength) * directionSign * CONFIG.force.twoHandBridge * influence * dt * 1.3;
+            vx -= dx * CONFIG.force.twoHandPull * influence * dt;
+            vy -= dy * CONFIG.force.twoHandPull * influence * dt;
+            vz -= dz * CONFIG.force.twoHandPull * influence * dt;
+            scatterAmount[i] = Math.max(scatterAmount[i], influence * 0.22);
+          }
+        }
+
+        const drag = Math.exp(-(dragBase + scatter * 0.75 + interaction.collect * 3.4) * dt);
+        vx *= drag;
+        vy *= drag;
+        vz *= drag;
+
+        x += vx * dt;
+        y += vy * dt;
+        z += vz * dt;
+
+        if (y < floor) {
+          y = floor + Math.abs(y - floor) * 0.15;
+          vy = Math.abs(vy) * 0.24;
+          vx *= 0.92;
+          vz *= 0.92;
+        }
+
+        const horizontalLimit = 12.5;
+        if (x > horizontalLimit || x < -horizontalLimit) {
+          x = THREE.MathUtils.clamp(x, -horizontalLimit, horizontalLimit);
+          vx *= -0.2;
+        }
+        if (z > horizontalLimit || z < -horizontalLimit) {
+          z = THREE.MathUtils.clamp(z, -horizontalLimit, horizontalLimit);
+          vz *= -0.2;
+        }
+
+        if (scatterAmount[i] > 0) {
+          const decay = 0.13 + seedAttributes[i] * 0.06 + interaction.collect * 0.32;
+          scatterAmount[i] = Math.max(0, scatterAmount[i] - decay * dt);
+        }
+
+        positions[i3] = x;
+        positions[i3 + 1] = y;
+        positions[i3 + 2] = z;
+        velocities[i3] = vx;
+        velocities[i3 + 1] = vy;
+        velocities[i3 + 2] = vz;
+      }
+    }
+
+    function updateTreeTrails() {
+      const trailLength = CONFIG.trail.treeLength;
+      const baseOpacity = CONFIG.trail.treeOpacity;
+
+      for (let i = 0; i < particleCount; i++) {
+        const i3 = i * 3;
+        const l = i * 6;
+        const x = positions[i3];
+        const y = positions[i3 + 1];
+        const z = positions[i3 + 2];
+        const vx = velocities[i3];
+        const vy = velocities[i3 + 1];
+        const vz = velocities[i3 + 2];
+        const speed = Math.hypot(vx, vy, vz);
+        const scatter = scatterAmount[i];
+        const tailScale = trailLength * Math.min(1.8, 0.3 + speed * 0.17);
+        const activity = THREE.MathUtils.clamp(
+          scatter * 0.7 + Math.max(0, speed - 0.18) * 0.08,
+          0,
+          1
+        );
+
+        trailPositions[l] = x;
+        trailPositions[l + 1] = y;
+        trailPositions[l + 2] = z;
+        trailPositions[l + 3] = x - vx * tailScale;
+        trailPositions[l + 4] = y - vy * tailScale;
+        trailPositions[l + 5] = z - vz * tailScale;
+        trailAlphas[i * 2] = activity * baseOpacity;
+        trailAlphas[i * 2 + 1] = activity * baseOpacity * 0.06;
+      }
+
+      positionAttribute.needsUpdate = true;
+      trailPositionAttribute.needsUpdate = true;
+      trailAlphaAttribute.needsUpdate = true;
+    }
+
+    function updateSparks(dt) {
+      for (let i = 0; i < sparkCount; i++) {
+        const state = sparkStates[i];
+        const i3 = i * 3;
+        const l = i * 6;
+
+        if (!state.active) {
+          sparkOpacities[i] = 0;
+          sparkTrailAlphas[i * 2] = 0;
+          sparkTrailAlphas[i * 2 + 1] = 0;
+          continue;
+        }
+
+        state.life -= dt;
+        if (state.life <= 0) {
+          state.active = false;
+          state.y = -999;
+          sparkPositions[i3 + 1] = -999;
+          sparkOpacities[i] = 0;
+          sparkTrailAlphas[i * 2] = 0;
+          sparkTrailAlphas[i * 2 + 1] = 0;
+          continue;
+        }
+
+        const drag = Math.exp(-state.drag * dt);
+        state.vx *= drag;
+        state.vy *= drag;
+        state.vz *= drag;
+        state.vy -= state.gravity * dt;
+        state.x += state.vx * dt;
+        state.y += state.vy * dt;
+        state.z += state.vz * dt;
+
+        const lifeRatio = state.life / state.maxLife;
+        const opacity = Math.min(1, lifeRatio * 1.8);
+        sparkPositions[i3] = state.x;
+        sparkPositions[i3 + 1] = state.y;
+        sparkPositions[i3 + 2] = state.z;
+        sparkOpacities[i] = opacity;
+
+        const tailScale = CONFIG.trail.sparkLength * Math.min(1.7, 0.55 + Math.hypot(state.vx, state.vy, state.vz) * 0.12);
+        sparkTrailPositions[l] = state.x;
+        sparkTrailPositions[l + 1] = state.y;
+        sparkTrailPositions[l + 2] = state.z;
+        sparkTrailPositions[l + 3] = state.x - state.vx * tailScale;
+        sparkTrailPositions[l + 4] = state.y - state.vy * tailScale;
+        sparkTrailPositions[l + 5] = state.z - state.vz * tailScale;
+
+        const colorScale = 1.8 * opacity;
+        const r = sparkColors[i3] * 0.68;
+        const g = sparkColors[i3 + 1] * 0.68;
+        const b = sparkColors[i3 + 2] * 0.68;
+        sparkTrailColors[l] = r * colorScale;
+        sparkTrailColors[l + 1] = g * colorScale;
+        sparkTrailColors[l + 2] = b * colorScale;
+        sparkTrailColors[l + 3] = r * colorScale;
+        sparkTrailColors[l + 4] = g * colorScale;
+        sparkTrailColors[l + 5] = b * colorScale;
+        sparkTrailAlphas[i * 2] = opacity * CONFIG.trail.sparkOpacity;
+        sparkTrailAlphas[i * 2 + 1] = opacity * CONFIG.trail.sparkOpacity * 0.02;
+      }
+
+      sparkPositionAttribute.needsUpdate = true;
+      sparkOpacityAttribute.needsUpdate = true;
+      sparkColorAttribute.needsUpdate = true;
+      sparkTrailPositionAttribute.needsUpdate = true;
+      sparkTrailColorAttribute.needsUpdate = true;
+      sparkTrailAlphaAttribute.needsUpdate = true;
+    }
+
+    // -------------------------------------------------------------------------
+    // 自适应分辨率：低帧率时只降低后处理分辨率，不减少粒子数量。
+    // -------------------------------------------------------------------------
+    let postPixelRatio = Math.min(window.devicePixelRatio || 1, 1.25);
+    let qualityStage = 0;
+    let performanceElapsed = 0;
+    let performanceFrames = 0;
+    let rendererPixelRatio = Math.min(window.devicePixelRatio || 1, 1.5);
+
+    function setComposerPixelRatio(value) {
+      postPixelRatio = value;
+      composer.setPixelRatio(postPixelRatio);
+      particleUniforms.uPixelRatio.value = postPixelRatio;
+      updateFxaaResolution();
+    }
+
+    function updateFxaaResolution() {
+      fxaaPass.uniforms.resolution.value.set(
+        1 / Math.max(1, window.innerWidth * postPixelRatio),
+        1 / Math.max(1, window.innerHeight * postPixelRatio)
+      );
+    }
+
+    function resize() {
+      const width = Math.max(1, window.innerWidth);
+      const height = Math.max(1, window.innerHeight);
+      rendererPixelRatio = Math.min(window.devicePixelRatio || 1, 1.5);
+      renderer.setPixelRatio(rendererPixelRatio);
+      renderer.setSize(width, height, false);
+      camera.aspect = width / height;
+      camera.updateProjectionMatrix();
+      composer.setPixelRatio(postPixelRatio);
+      composer.setSize(width, height);
+      filmGradeShader.uniforms.uResolution.value.set(width * postPixelRatio, height * postPixelRatio);
+      updateFxaaResolution();
+    }
+
+    window.addEventListener("resize", resize);
+
+    function adaptQuality(dt) {
+      performanceElapsed += dt;
+      performanceFrames++;
+      if (performanceElapsed < 2.8) return;
+
+      const fps = performanceFrames / performanceElapsed;
+      if (fps < 47 && qualityStage < 2) {
+        qualityStage++;
+        const nextRatio = qualityStage === 1
+          ? Math.min(postPixelRatio, 1)
+          : Math.min(postPixelRatio, 0.92);
+        setComposerPixelRatio(nextRatio);
+      }
+
+      performanceElapsed = 0;
+      performanceFrames = 0;
+    }
+
+    function animate() {
+      requestAnimationFrame(animate);
+      const dt = Math.min(0.033, clock.getDelta());
+      const elapsed = clock.elapsedTime;
+
+      interaction.handActivity += ((trackedHands.size > 0 ? 1 : 0) - interaction.handActivity) * (1 - Math.exp(-dt * 4));
+      interaction.burstGlow *= Math.exp(-dt * 2.9);
+
+      const heartAge = performance.now() / 1000 - interaction.heartStartedAt;
+      interaction.heartGlow = heartAge >= 0 && heartAge < 2.8
+        ? Math.pow(1 - heartAge / 2.8, 1.35)
+        : 0;
+
+      particleUniforms.uTime.value = elapsed;
+      particleUniforms.uCollect.value = interaction.collect;
+      particleUniforms.uGlow.value = 1 + interaction.heartGlow * 0.16;
+
+      updateParticlePhysics(dt, elapsed);
+      updateTreeTrails();
+      updateSparks(dt);
+
+      treeGroup.rotation.y += CONFIG.tree.idleSpin *
+        (1 - interaction.handActivity * (1 - CONFIG.tree.interactionSpinScale)) *
+        dt;
+
+      smoothBloom.wideStrength = CONFIG.bloom.wideStrength +
+        interaction.heartGlow * CONFIG.bloom.heartBoost +
+        interaction.burstGlow * CONFIG.bloom.burstBoost;
+      smoothBloom.nearStrength = CONFIG.bloom.coreStrength +
+        interaction.heartGlow * CONFIG.bloom.heartBoost * 0.82 +
+        interaction.burstGlow * CONFIG.bloom.burstBoost * 0.55;
+      gradePass.uniforms.uTime.value = elapsed;
+      gradePass.uniforms.uHeart.value = interaction.heartGlow;
+      gradePass.uniforms.uHeartTime.value = Math.max(4, heartAge);
+      atmosphereMaterial.uniforms.uTime.value = elapsed;
+      atmosphereMaterial.uniforms.uHeart.value = interaction.heartGlow;
+
+      adaptQuality(dt);
+      composer.render();
+    }
+
+    resize();
+    animate();
+    initializeHandTracking();
+  </script>
+</body>
+</html>
