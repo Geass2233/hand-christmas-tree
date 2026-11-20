@@ -185,6 +185,9 @@
     const video = document.querySelector("#camera");
     const notice = document.querySelector("#notice");
     const clock = new THREE.Clock();
+    const isMobileDevice =
+      window.matchMedia("(pointer: coarse)").matches ||
+      Math.min(window.innerWidth, window.innerHeight) < 700;
     const tempWorld = new THREE.Vector3();
     const tempVector = new THREE.Vector3();
     const tempColor = new THREE.Color();
@@ -596,7 +599,7 @@
     // -------------------------------------------------------------------------
     const particleUniforms = {
       uTime: { value: 0 },
-      uPixelRatio: { value: Math.min(window.devicePixelRatio || 1, 1.25) },
+      uPixelRatio: { value: Math.min(window.devicePixelRatio || 1, isMobileDevice ? 1 : 1.25) },
       uCollect: { value: 0 },
       uGlow: { value: 1 }
     };
@@ -1578,7 +1581,7 @@
         });
         handsModel.setOptions({
           maxNumHands: 2,
-          modelComplexity: 1,
+          modelComplexity: isMobileDevice ? 0 : 1,
           minDetectionConfidence: 0.64,
           minTrackingConfidence: 0.67
         });
@@ -1884,11 +1887,11 @@
     // -------------------------------------------------------------------------
     // 自适应分辨率：低帧率时只降低后处理分辨率，不减少粒子数量。
     // -------------------------------------------------------------------------
-    let postPixelRatio = Math.min(window.devicePixelRatio || 1, 1.25);
+    let postPixelRatio = Math.min(window.devicePixelRatio || 1, isMobileDevice ? 1 : 1.25);
     let qualityStage = 0;
     let performanceElapsed = 0;
     let performanceFrames = 0;
-    let rendererPixelRatio = Math.min(window.devicePixelRatio || 1, 1.5);
+    let rendererPixelRatio = Math.min(window.devicePixelRatio || 1, isMobileDevice ? 1.35 : 1.5);
 
     function setComposerPixelRatio(value) {
       postPixelRatio = value;
@@ -1907,7 +1910,7 @@
     function resize() {
       const width = Math.max(1, window.innerWidth);
       const height = Math.max(1, window.innerHeight);
-      rendererPixelRatio = Math.min(window.devicePixelRatio || 1, 1.5);
+      rendererPixelRatio = Math.min(window.devicePixelRatio || 1, isMobileDevice ? 1.35 : 1.5);
       renderer.setPixelRatio(rendererPixelRatio);
       renderer.setSize(width, height, false);
       camera.aspect = width / height;
